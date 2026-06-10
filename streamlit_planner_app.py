@@ -22,7 +22,13 @@ def sheet_name(excel_file, target):
 
 @st.cache_data(show_spinner=False)
 def load_tables(file_bytes):
-    source = BytesIO(file_bytes) if file_bytes else DEFAULT_INPUT
+    if file_bytes:
+        source = BytesIO(file_bytes)
+    elif DEFAULT_INPUT.exists():
+        source = DEFAULT_INPUT
+    else:
+        return None
+
     xl = pd.ExcelFile(source)
 
     def read(target, required=True):
@@ -96,6 +102,10 @@ try:
     tables = load_tables(file_bytes)
 except Exception as exc:
     st.error(str(exc))
+    st.stop()
+
+if tables is None:
+    st.info("Please upload an input Excel file from the sidebar to start.")
     st.stop()
 
 target_reach_default = float(target_value(tables["target"], "Target Reach Level", planner.DEFAULT_TESTER_CONFIG["target_REACH"]))
