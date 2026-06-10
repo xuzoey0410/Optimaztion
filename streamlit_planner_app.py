@@ -83,40 +83,64 @@ def build_input_workbook(flow_df, product_df, demand_df, inventory_df, target_re
     return temp_path
 
 
-def make_output_bytes(results, stages, products, tester_config, inventory_map):
+def build_table_output(monthly_summary_df):
+    table_df = monthly_summary_df.pivot_table(
+        index=["Basic_Type", "Product_Key"],
+        columns="Month",
+        values="WaferStart",
+        aggfunc="sum",
+        fill_value=0,
+        margins=True,
+        margins_name="Grand Total",
+    ).reset_index()
+
+    table_df = table_df.rename(columns={"Basic_Type": "Basic Type", "Product_Key": "Row Labels"})
+    return table_df
+
+
+def build_graph_output(monthly_summary_df):
+    graph_df = monthly_summary_df.pivot_table(
+        index="Month",
+        columns="Product_Key",
+        values="Max_TesterUsed",
+        aggfunc="sum",
+        fill_value=0,
+        margins=True,
+        margins_name="Grand Total",
+    ).reset_index()
+
+    return graph_df.rename(columns={"Month": "Row Labels"})
+
+
+def make_output_bytes(graph_df, table_df):
     output = BytesIO()
-    planner.write_output_excel(output, *results, stages, products, tester_config, inventory_map)
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        graph_df.to_excel(writer, sheet_name="Graph", index=False)
+        table_df.to_excel(writer, sheet_name="Table", index=False)
     output.seek(0)
     return output.getvalue()
 
 
-def draw_monthly_charts(monthly_summary_df):
-    chart_df = monthly_summary_df.copy()
-    chart_df["Month"] = chart_df["Month"].astype(str)
+def draw_graph(graph_df):
+    chart_df = graph_df[graph_df["Row Labels"].astype(str) != "Grand Total"].copy()
+    chart_df = chart_df.melt(
+        id_vars="Row Labels",
+        var_name="Product",
+        value_name="Tester Used",
+    )
+    chart_df = chart_df[chart_df["Product"] != "Grand Total"]
 
     tester_fig = px.bar(
         chart_df,
-        x="Month",
-        y="Max_TesterUsed",
-        color="Product_Key",
+        x="Row Labels",
+        y="Tester Used",
+        color="Product",
         title="Monthly Tester Used",
-        labels={"Max_TesterUsed": "Tester Used", "Product_Key": "Product"},
     )
     tester_fig.update_layout(barmode="stack", xaxis_title="Month", yaxis_title="Tester Used")
 
-    demand_fig = px.bar(
-        chart_df,
-        x="Month",
-        y="Demand",
-        color="Product_Key",
-        title="Monthly VRFC Demand",
-        labels={"Demand": "VRFC Demand", "Product_Key": "Product"},
-    )
-    demand_fig.update_layout(barmode="stack", xaxis_title="Month", yaxis_title="VRFC Demand")
-
-    st.subheader("Charts")
+    st.subheader("Graph")
     st.plotly_chart(tester_fig, use_container_width=True)
-    st.plotly_chart(demand_fig, use_container_width=True)
 
 
 uploaded = st.sidebar.file_uploader("Upload input Excel", type=["xlsx"])
@@ -168,32 +192,25 @@ if st.button("Run plan", type="primary"):
             input_path = build_input_workbook(flow_df, product_df, demand_df, inventory_df, target_reach, tester_number)
             stages, products, weekly_demand_map, month_label_map, tester_config, inventory_map = planner.load_all_inputs(input_path)
             results = planner.run_all_products(stages, products, weekly_demand_map, month_label_map, tester_config, inventory_map)
-            output_bytes = make_output_bytes(results, stages, products, tester_config, inventory_map)
         except Exception as exc:
             st.error(str(exc))
             st.stop()
 
     all_plan_df, summary_df, monthly_summary_df, skipped_df = results
+    graph_df = build_graph_output(monthly_summary_df)
+    table_df = build_table_output(monthly_summary_df)
+    output_bytes = make_output_bytes(graph_df, table_df)
+
     st.success("Plan generated")
 
-    st.subheader("Summary")
-    st.dataframe(summary_df, use_container_width=True)
+    draw_graph(graph_df)
 
-    draw_monthly_charts(monthly_summary_df)
-
-    st.subheader("Monthly Summary")
-    st.dataframe(monthly_summary_df, use_container_width=True)
-
-    with st.expander("All Product Plan"):
-        st.dataframe(all_plan_df, use_container_width=True)
-
-    if not skipped_df.empty:
-        with st.expander("Skipped Products"):
-            st.dataframe(skipped_df, use_container_width=True)
+    st.subheader("Table")
+    st.dataframe(table_df, use_container_width=True)
 
     st.download_button(
-        "Download Excel output",
+        "Download Graph and Table Excel",
         data=output_bytes,
-        file_name="multi_product_plan_output.xlsx",
+        file_name="graph_table_output.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
