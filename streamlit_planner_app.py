@@ -3,12 +3,15 @@ from pathlib import Path
 import tempfile
 
 import pandas as pd
+import plotly.express as px
 import streamlit as st
 
 import output123 as planner
 
 
-DEFAULT_INPUT = Path(r"C:\Users\xuzi\Desktop\Demand Project\All_Output1.xlsx")
+APP_DIR = Path(__file__).parent
+SAMPLE_INPUT = APP_DIR / "input_sample.xlsx"
+LOCAL_INPUT = APP_DIR / "All_Output1.xlsx"
 
 
 st.set_page_config(page_title="Production Planner", layout="wide")
@@ -24,8 +27,10 @@ def sheet_name(excel_file, target):
 def load_tables(file_bytes):
     if file_bytes:
         source = BytesIO(file_bytes)
-    elif DEFAULT_INPUT.exists():
-        source = DEFAULT_INPUT
+    elif SAMPLE_INPUT.exists():
+        source = SAMPLE_INPUT
+    elif LOCAL_INPUT.exists():
+        source = LOCAL_INPUT
     else:
         return None
 
@@ -85,6 +90,35 @@ def make_output_bytes(results, stages, products, tester_config, inventory_map):
     return output.getvalue()
 
 
+def draw_monthly_charts(monthly_summary_df):
+    chart_df = monthly_summary_df.copy()
+    chart_df["Month"] = chart_df["Month"].astype(str)
+
+    tester_fig = px.bar(
+        chart_df,
+        x="Month",
+        y="Max_TesterUsed",
+        color="Product_Key",
+        title="Monthly Tester Used",
+        labels={"Max_TesterUsed": "Tester Used", "Product_Key": "Product"},
+    )
+    tester_fig.update_layout(barmode="stack", xaxis_title="Month", yaxis_title="Tester Used")
+
+    demand_fig = px.bar(
+        chart_df,
+        x="Month",
+        y="Demand",
+        color="Product_Key",
+        title="Monthly VRFC Demand",
+        labels={"Demand": "VRFC Demand", "Product_Key": "Product"},
+    )
+    demand_fig.update_layout(barmode="stack", xaxis_title="Month", yaxis_title="VRFC Demand")
+
+    st.subheader("Charts")
+    st.plotly_chart(tester_fig, use_container_width=True)
+    st.plotly_chart(demand_fig, use_container_width=True)
+
+
 uploaded = st.sidebar.file_uploader("Upload input Excel", type=["xlsx"])
 file_bytes = uploaded.getvalue() if uploaded else None
 
@@ -105,7 +139,7 @@ except Exception as exc:
     st.stop()
 
 if tables is None:
-    st.info("Please upload an input Excel file from the sidebar to start.")
+    st.info("Please upload an input Excel file from the sidebar, or add input_sample.xlsx to the GitHub repo.")
     st.stop()
 
 target_reach_default = float(target_value(tables["target"], "Target Reach Level", planner.DEFAULT_TESTER_CONFIG["target_REACH"]))
@@ -144,6 +178,8 @@ if st.button("Run plan", type="primary"):
 
     st.subheader("Summary")
     st.dataframe(summary_df, use_container_width=True)
+
+    draw_monthly_charts(monthly_summary_df)
 
     st.subheader("Monthly Summary")
     st.dataframe(monthly_summary_df, use_container_width=True)
