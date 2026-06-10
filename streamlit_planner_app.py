@@ -274,6 +274,25 @@ def make_output_bytes(graph_outputs, wafer_start_table, bump_sort_dps_table):
 def style_display_table(output_df):
     numeric_cols = output_df.select_dtypes(include="number").columns.tolist()
 
+    def heatmap_column(column):
+        values = pd.to_numeric(column, errors="coerce")
+        min_value = values.min()
+        max_value = values.max()
+        if pd.isna(min_value) or pd.isna(max_value) or min_value == max_value:
+            return ["background-color: #f7fbff" for _ in column]
+
+        styles = []
+        for value in values:
+            if pd.isna(value):
+                styles.append("")
+                continue
+            strength = (value - min_value) / (max_value - min_value)
+            blue = int(245 - 55 * strength)
+            green = int(250 - 80 * strength)
+            red = int(255 - 120 * strength)
+            styles.append(f"background-color: rgb({red}, {green}, {blue})")
+        return styles
+
     def highlight_total(row):
         is_total = any(str(value) == "Grand Total" for value in row.values)
         return ["background-color: #d9eaf7; font-weight: 700" if is_total else "" for _ in row]
@@ -288,7 +307,7 @@ def style_display_table(output_df):
     )
 
     if numeric_cols:
-        styler = styler.background_gradient(cmap="YlGnBu", subset=numeric_cols)
+        styler = styler.apply(heatmap_column, subset=numeric_cols, axis=0)
 
     return styler.apply(highlight_total, axis=1)
 
