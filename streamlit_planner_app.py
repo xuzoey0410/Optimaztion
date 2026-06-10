@@ -5,6 +5,8 @@ import tempfile
 import pandas as pd
 import plotly.express as px
 import streamlit as st
+from openpyxl.chart import AreaChart, BarChart, LineChart, Reference
+from openpyxl.utils.dataframe import dataframe_to_rows
 
 import output123 as planner
 
@@ -83,7 +85,25 @@ def build_input_workbook(flow_df, product_df, demand_df, inventory_df, target_re
     return temp_path
 
 
-def build_table_output(monthly_summary_df):
+def build_month_product_table(monthly_summary_df, value_col, aggfunc="sum"):
+    output_df = monthly_summary_df.pivot_table(
+        index="Month",
+        columns="Product_Key",
+        values=value_col,
+        aggfunc=aggfunc,
+        fill_value=0,
+        margins=True,
+        margins_name="Grand Total",
+    ).reset_index()
+
+    output_df = output_df.rename(columns={"Month": "Row Labels"})
+    if aggfunc == "mean":
+        value_columns = [col for col in output_df.columns if col != "Row Labels"]
+        output_df[value_columns] = output_df[value_columns].round(2)
+    return output_df
+
+
+def build_wafer_start_table(monthly_summary_df):
     table_df = monthly_summary_df.pivot_table(
         index=["Basic_Type", "Product_Key"],
         columns="Month",
@@ -98,49 +118,108 @@ def build_table_output(monthly_summary_df):
     return table_df
 
 
-def build_graph_output(monthly_summary_df):
-    graph_df = monthly_summary_df.pivot_table(
-        index="Month",
-        columns="Product_Key",
-        values="Max_TesterUsed",
+def build_bump_sort_dps_table(monthly_summary_df):
+    long_df = monthly_summary_df.melt(
+        id_vars=["Basic_Type", "Product_Key", "Month"],
+        value_vars=["Bump_Wafer", "Sort_Wafer", "DPS_Chip"],
+        var_name="Metric",
+        value_name="Value",
+    )
+    long_df["Metric"] = long_df["Metric"].replace({
+        "Bump_Wafer": "Bump",
+        "Sort_Wafer": "Sort",
+        "DPS_Chip": "DPS",
+    })
+
+    table_df = long_df.pivot_table(
+        index=["Basic_Type", "Product_Key", "Metric"],
+        columns="Month",
+        values="Value",
         aggfunc="sum",
         fill_value=0,
         margins=True,
         margins_name="Grand Total",
     ).reset_index()
 
-    return graph_df.rename(columns={"Month": "Row Labels"})
+    return table_df.rename(columns={"Basic_Type": "Basic Type", "Product_Key": "Row Labels"})
 
 
-def make_output_bytes(graph_df, table_df):
+def build_graph_outputs(monthly_summary_df):
+    return [
+        ("Tester Used", build_month_product_table(monthly_summary_df, "Max_TesterUsed", "sum"), "bar"),
+        ("vRFN Demand", build_month_product_table(monthly_summary_df, "Demand", "sum"), "bar"),
+        ("Reach Level", build_month_product_table(monthly_summary_df, "Avg_REACH", "mean"), "line"),
+        ("Stock", build_month_product_table(monthly_summary_df, "End_Stock", "sum"), "area"),
+    ]
+
+
+def add_table_block(worksheet, title, output_df, start_row):
+    worksheet.cell(row=start_row, column=1, value=title)
+    header_row = start_row + 1
+
+    for row_index, row_values in enumerate(dataframe_to_rows(output_df, index=False, header=True), header_row):
+        for column_index, value in enumerate(row_values, 1):
+            worksheet.cell(row=row_index, column=column_index, value=value)
+
+    return header_row, header_row + len(output_df), len(output_df.columns)
+
+
+def add_excel_chart(worksheet, title, chart_kind, header_row, last_row, last_col, anchor):
+    chart_last_col = last_col - 1 if worksheet.cell(row=header_row, column=last_col).value == "Grand Total" else last_col
+    if chart_last_col < 2 or last_row <= header_row:
+        return
+
+    chart_map = {"bar": BarChart, "line": LineChart, "area": AreaChart}
+    chart = chart_map[chart_kind]()
+    chart.title = title
+    chart.height = 10
+    chart.width = 20
+
+    data = Reference(worksheet, min_col=2, max_col=chart_last_col, min_row=header_row, max_row=last_row)
+    categories = Reference(worksheet, min_col=1, min_row=header_row + 1, max_row=last_row)
+    chart.add_data(data, titles_from_data=True)
+    chart.set_categories(categories)
+
+    if chart_kind == "bar":
+        chart.type = "col"
+        chart.style = 10
+    elif chart_kind == "area":
+        chart.grouping = "stacked"
+
+    worksheet.add_chart(chart, anchor)
+
+
+def make_output_bytes(graph_outputs, wafer_start_table, bump_sort_dps_table):
     output = BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        graph_df.to_excel(writer, sheet_name="Graph", index=False)
-        table_df.to_excel(writer, sheet_name="Table", index=False)
+        wafer_start_table.to_excel(writer, sheet_name="Wafer_Start", index=False)
+        bump_sort_dps_table.to_excel(writer, sheet_name="Bump_Sort_DPS", index=False)
+
+        graph_sheet = writer.book.create_sheet("Graph", 0)
+        for start_row, (title, graph_df, chart_kind) in zip([1, 30, 59, 88], graph_outputs):
+            header_row, last_row, last_col = add_table_block(graph_sheet, title, graph_df, start_row)
+            add_excel_chart(graph_sheet, title, chart_kind, header_row, last_row, last_col, f"L{start_row}")
     output.seek(0)
     return output.getvalue()
 
 
-def draw_graph(graph_df):
-    chart_df = graph_df[graph_df["Row Labels"].astype(str) != "Grand Total"].copy()
-    chart_df = chart_df.melt(
-        id_vars="Row Labels",
-        var_name="Product",
-        value_name="Tester Used",
-    )
-    chart_df = chart_df[chart_df["Product"] != "Grand Total"]
-
-    tester_fig = px.bar(
-        chart_df,
-        x="Row Labels",
-        y="Tester Used",
-        color="Product",
-        title="Monthly Tester Used",
-    )
-    tester_fig.update_layout(barmode="stack", xaxis_title="Month", yaxis_title="Tester Used")
-
+def draw_graphs(graph_outputs):
     st.subheader("Graph")
-    st.plotly_chart(tester_fig, use_container_width=True)
+    for title, graph_df, chart_kind in graph_outputs:
+        chart_df = graph_df[graph_df["Row Labels"].astype(str) != "Grand Total"].copy()
+        chart_df = chart_df.melt(id_vars="Row Labels", var_name="Product", value_name=title)
+        chart_df = chart_df[chart_df["Product"] != "Grand Total"]
+
+        if chart_kind == "line":
+            chart = px.line(chart_df, x="Row Labels", y=title, color="Product", markers=True, title=title)
+        elif chart_kind == "area":
+            chart = px.area(chart_df, x="Row Labels", y=title, color="Product", title=title)
+        else:
+            chart = px.bar(chart_df, x="Row Labels", y=title, color="Product", title=title)
+            chart.update_layout(barmode="stack")
+
+        chart.update_layout(xaxis_title="Month", yaxis_title=title)
+        st.plotly_chart(chart, use_container_width=True)
 
 
 uploaded = st.sidebar.file_uploader("Upload input Excel", type=["xlsx"])
@@ -197,20 +276,24 @@ if st.button("Run plan", type="primary"):
             st.stop()
 
     all_plan_df, summary_df, monthly_summary_df, skipped_df = results
-    graph_df = build_graph_output(monthly_summary_df)
-    table_df = build_table_output(monthly_summary_df)
-    output_bytes = make_output_bytes(graph_df, table_df)
+    graph_outputs = build_graph_outputs(monthly_summary_df)
+    wafer_start_table = build_wafer_start_table(monthly_summary_df)
+    bump_sort_dps_table = build_bump_sort_dps_table(monthly_summary_df)
+    output_bytes = make_output_bytes(graph_outputs, wafer_start_table, bump_sort_dps_table)
 
     st.success("Plan generated")
 
-    draw_graph(graph_df)
+    draw_graphs(graph_outputs)
 
-    st.subheader("Table")
-    st.dataframe(table_df, use_container_width=True)
+    st.subheader("Wafer Start")
+    st.dataframe(wafer_start_table, use_container_width=True)
+
+    st.subheader("Bump Sort DPS")
+    st.dataframe(bump_sort_dps_table, use_container_width=True)
 
     st.download_button(
-        "Download Graph and Table Excel",
+        "Download Final Output Excel",
         data=output_bytes,
-        file_name="graph_table_output.xlsx",
+        file_name="final_output_graphs_tables.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
