@@ -155,9 +155,9 @@ def build_graph_outputs(monthly_summary_df):
 
     return [
         ("Tester Used", build_month_product_table(monthly_summary_df, "Max_TesterUsed", "sum"), "bar"),
-        ("vRFN Demand", build_month_product_table(monthly_summary_df, "Demand", "sum"), "bar"),
+        ("VRFN Demand", build_month_product_table(monthly_summary_df, "Demand", "sum"), "bar"),
         ("Reach Level", build_month_product_table(monthly_summary_df, "Avg_REACH", "mean"), "line"),
-        ("Stock", stock_df, "stock"),
+        ("Stock Development", stock_df, "stock"),
     ]
 
 
