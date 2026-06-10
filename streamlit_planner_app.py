@@ -6,7 +6,9 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 from openpyxl.chart import AreaChart, BarChart, LineChart, Reference
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils.dataframe import dataframe_to_rows
+from openpyxl.utils import get_column_letter
 
 import output123 as planner
 
@@ -145,31 +147,82 @@ def build_bump_sort_dps_table(monthly_summary_df):
 
 
 def build_graph_outputs(monthly_summary_df):
+    stock_df = build_month_product_table(monthly_summary_df, "End_Stock", "sum")
+    demand_df = build_month_product_table(monthly_summary_df, "Demand", "sum")
+    month_rows = demand_df["Row Labels"].astype(str) != "Grand Total"
+    stock_df["Next Month Demand"] = 0
+    stock_df.loc[month_rows, "Next Month Demand"] = demand_df.loc[month_rows, "Grand Total"].shift(-1).fillna(0).values
+
     return [
         ("Tester Used", build_month_product_table(monthly_summary_df, "Max_TesterUsed", "sum"), "bar"),
         ("vRFN Demand", build_month_product_table(monthly_summary_df, "Demand", "sum"), "bar"),
         ("Reach Level", build_month_product_table(monthly_summary_df, "Avg_REACH", "mean"), "line"),
-        ("Stock", build_month_product_table(monthly_summary_df, "End_Stock", "sum"), "area"),
+        ("Stock", stock_df, "stock"),
     ]
+
+
+def style_excel_range(worksheet, header_row, last_row, last_col):
+    header_fill = PatternFill("solid", fgColor="1F4E78")
+    total_fill = PatternFill("solid", fgColor="D9EAF7")
+    metric_fill = PatternFill("solid", fgColor="EAF3F8")
+    white_font = Font(color="FFFFFF", bold=True)
+    bold_font = Font(bold=True)
+    thin_side = Side(style="thin", color="D0D7DE")
+    border = Border(left=thin_side, right=thin_side, top=thin_side, bottom=thin_side)
+
+    for cell in worksheet[header_row]:
+        if cell.column <= last_col:
+            cell.fill = header_fill
+            cell.font = white_font
+            cell.alignment = Alignment(horizontal="center")
+            cell.border = border
+
+    for row in worksheet.iter_rows(min_row=header_row + 1, max_row=last_row, max_col=last_col):
+        is_total_row = any(str(cell.value) == "Grand Total" for cell in row[:3])
+        for cell in row:
+            cell.border = border
+            cell.alignment = Alignment(horizontal="center")
+            if is_total_row:
+                cell.fill = total_fill
+                cell.font = bold_font
+            elif cell.column <= 3:
+                cell.fill = metric_fill
+
+    worksheet.freeze_panes = worksheet.cell(row=header_row + 1, column=2)
+    for column_index in range(1, last_col + 1):
+        max_len = max(
+            len(str(worksheet.cell(row=row_index, column=column_index).value or ""))
+            for row_index in range(header_row, last_row + 1)
+        )
+        worksheet.column_dimensions[get_column_letter(column_index)].width = min(max(max_len + 2, 11), 18)
 
 
 def add_table_block(worksheet, title, output_df, start_row):
     worksheet.cell(row=start_row, column=1, value=title)
+    worksheet.cell(row=start_row, column=1).font = Font(bold=True, size=14, color="1F4E78")
     header_row = start_row + 1
 
     for row_index, row_values in enumerate(dataframe_to_rows(output_df, index=False, header=True), header_row):
         for column_index, value in enumerate(row_values, 1):
             worksheet.cell(row=row_index, column=column_index, value=value)
 
+    style_excel_range(worksheet, header_row, header_row + len(output_df), len(output_df.columns))
     return header_row, header_row + len(output_df), len(output_df.columns)
 
 
 def add_excel_chart(worksheet, title, chart_kind, header_row, last_row, last_col, anchor):
-    chart_last_col = last_col - 1 if worksheet.cell(row=header_row, column=last_col).value == "Grand Total" else last_col
+    headers = [worksheet.cell(row=header_row, column=col).value for col in range(1, last_col + 1)]
+    overlay_col = headers.index("Next Month Demand") + 1 if "Next Month Demand" in headers else None
+    chart_last_col = last_col
+
+    if overlay_col:
+        chart_last_col = overlay_col - 1
+    if worksheet.cell(row=header_row, column=chart_last_col).value == "Grand Total":
+        chart_last_col -= 1
     if chart_last_col < 2 or last_row <= header_row:
         return
 
-    chart_map = {"bar": BarChart, "line": LineChart, "area": AreaChart}
+    chart_map = {"bar": BarChart, "line": LineChart, "area": AreaChart, "stock": BarChart}
     chart = chart_map[chart_kind]()
     chart.title = title
     chart.height = 10
@@ -180,13 +233,26 @@ def add_excel_chart(worksheet, title, chart_kind, header_row, last_row, last_col
     chart.add_data(data, titles_from_data=True)
     chart.set_categories(categories)
 
-    if chart_kind == "bar":
+    if chart_kind in ["bar", "stock"]:
         chart.type = "col"
         chart.style = 10
     elif chart_kind == "area":
         chart.grouping = "stacked"
 
+    if chart_kind == "stock" and overlay_col:
+        line_chart = LineChart()
+        line_data = Reference(worksheet, min_col=overlay_col, max_col=overlay_col, min_row=header_row, max_row=last_row)
+        line_chart.add_data(line_data, titles_from_data=True)
+        line_chart.set_categories(categories)
+        line_chart.y_axis.axId = 200
+        line_chart.y_axis.title = "Next Month Demand"
+        chart += line_chart
+
     worksheet.add_chart(chart, anchor)
+
+
+def style_excel_sheet(worksheet):
+    style_excel_range(worksheet, 1, worksheet.max_row, worksheet.max_column)
 
 
 def make_output_bytes(graph_outputs, wafer_start_table, bump_sort_dps_table):
@@ -194,6 +260,8 @@ def make_output_bytes(graph_outputs, wafer_start_table, bump_sort_dps_table):
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         wafer_start_table.to_excel(writer, sheet_name="Wafer_Start", index=False)
         bump_sort_dps_table.to_excel(writer, sheet_name="Bump_Sort_DPS", index=False)
+        style_excel_sheet(writer.book["Wafer_Start"])
+        style_excel_sheet(writer.book["Bump_Sort_DPS"])
 
         graph_sheet = writer.book.create_sheet("Graph", 0)
         for start_row, (title, graph_df, chart_kind) in zip([1, 30, 59, 88], graph_outputs):
@@ -203,10 +271,56 @@ def make_output_bytes(graph_outputs, wafer_start_table, bump_sort_dps_table):
     return output.getvalue()
 
 
+def style_display_table(output_df):
+    numeric_cols = output_df.select_dtypes(include="number").columns.tolist()
+
+    def highlight_total(row):
+        is_total = any(str(value) == "Grand Total" for value in row.values)
+        return ["background-color: #d9eaf7; font-weight: 700" if is_total else "" for _ in row]
+
+    styler = (
+        output_df.style
+        .format({col: "{:,.0f}" for col in numeric_cols})
+        .set_table_styles([
+            {"selector": "th", "props": [("background-color", "#1f4e78"), ("color", "white"), ("font-weight", "700")]},
+            {"selector": "td", "props": [("border-color", "#d0d7de")]},
+        ])
+    )
+
+    if numeric_cols:
+        styler = styler.background_gradient(cmap="YlGnBu", subset=numeric_cols)
+
+    return styler.apply(highlight_total, axis=1)
+
+
 def draw_graphs(graph_outputs):
     st.subheader("Graph")
     for title, graph_df, chart_kind in graph_outputs:
         chart_df = graph_df[graph_df["Row Labels"].astype(str) != "Grand Total"].copy()
+
+        if chart_kind == "stock":
+            demand_line = chart_df[["Row Labels", "Next Month Demand"]].copy()
+            product_cols = [col for col in chart_df.columns if col not in ["Row Labels", "Grand Total", "Next Month Demand"]]
+            chart_df = chart_df.melt(
+                id_vars="Row Labels",
+                value_vars=product_cols,
+                var_name="Product",
+                value_name=title,
+            )
+            chart = px.bar(chart_df, x="Row Labels", y=title, color="Product", title=title)
+            chart.update_layout(barmode="stack")
+            chart.add_scatter(
+                x=demand_line["Row Labels"],
+                y=demand_line["Next Month Demand"],
+                mode="lines+markers",
+                name="Next Month Demand",
+                line={"color": "#d62728", "width": 3},
+                marker={"size": 8},
+            )
+            chart.update_layout(xaxis_title="Month", yaxis_title="Stock / Next Month Demand")
+            st.plotly_chart(chart, use_container_width=True)
+            continue
+
         chart_df = chart_df.melt(id_vars="Row Labels", var_name="Product", value_name=title)
         chart_df = chart_df[chart_df["Product"] != "Grand Total"]
 
@@ -286,10 +400,10 @@ if st.button("Run plan", type="primary"):
     draw_graphs(graph_outputs)
 
     st.subheader("Wafer Start")
-    st.dataframe(wafer_start_table, use_container_width=True)
+    st.dataframe(style_display_table(wafer_start_table), use_container_width=True)
 
     st.subheader("Bump Sort DPS")
-    st.dataframe(bump_sort_dps_table, use_container_width=True)
+    st.dataframe(style_display_table(bump_sort_dps_table), use_container_width=True)
 
     st.download_button(
         "Download Final Output Excel",
